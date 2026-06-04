@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strings"
 )
 
 var (
@@ -51,10 +52,73 @@ func (f AuthenticatorFunc[S]) AuthenticateOCI(ctx context.Context, req AuthReque
 	return f(ctx, req)
 }
 
-// Target describes where an authorized request should be forwarded.
+// Target describes where an authorized request should be forwarded. RepoMapper
+// maps client-facing repository paths to upstream repository paths for the
+// current request. A nil mapper uses the same path upstream.
 type Target struct {
 	BaseURL       *url.URL
 	Authorization string
+	RepoMapper    RepoMapper
+}
+
+// UpstreamRepo returns the upstream repository path for a client-facing repo.
+func (t Target) UpstreamRepo(repo string) string {
+	if t.RepoMapper != nil {
+		return t.RepoMapper.UpstreamRepo(repo)
+	}
+	return repo
+}
+
+// ClientRepo returns the client-facing repository path for an upstream repo.
+func (t Target) ClientRepo(repo string) (string, bool) {
+	if t.RepoMapper != nil {
+		return t.RepoMapper.ClientRepo(repo)
+	}
+	return repo, true
+}
+
+// RepoMapper translates repositories for one request/session. Implementations
+// should be deterministic for the lifetime of the request.
+type RepoMapper interface {
+	UpstreamRepo(clientRepo string) string
+	ClientRepo(upstreamRepo string) (clientRepo string, ok bool)
+}
+
+type RepoMapperFunc struct {
+	Upstream func(clientRepo string) string
+	Public   func(upstreamRepo string) (string, bool)
+}
+
+func (m RepoMapperFunc) UpstreamRepo(repo string) string {
+	if m.Upstream != nil {
+		return m.Upstream(repo)
+	}
+	return repo
+}
+
+func (m RepoMapperFunc) ClientRepo(repo string) (string, bool) {
+	if m.Public != nil {
+		return m.Public(repo)
+	}
+	return repo, true
+}
+
+type PrefixRepoMapper string
+
+func (m PrefixRepoMapper) UpstreamRepo(repo string) string {
+	prefix := strings.Trim(string(m), "/")
+	if prefix == "" {
+		return repo
+	}
+	return prefix + "/" + repo
+}
+
+func (m PrefixRepoMapper) ClientRepo(repo string) (string, bool) {
+	prefix := strings.Trim(string(m), "/")
+	if prefix == "" {
+		return repo, true
+	}
+	return strings.CutPrefix(repo, prefix+"/")
 }
 
 // TargetRequest is passed to a TargetResolver after local authentication.

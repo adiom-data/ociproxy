@@ -24,6 +24,7 @@ proxy, err := ociproxy.New[UserSession](
 		return ociproxy.Target{
 			BaseURL:       upstream,
 			Authorization: "Bearer hidden-upstream-token",
+			RepoMapper:    ociproxy.PrefixRepoMapper("remote/123"),
 		}, nil
 	}),
 	ociproxy.AuthorizerFunc[UserSession](func(ctx context.Context, req ociproxy.PolicyRequest[UserSession]) error {
@@ -53,8 +54,14 @@ Blob upload sessions are kept stateless by replacing the upstream upload UUID in
 the client-facing `Location` with a signed token. `tokenKey` is the HMAC secret
 used to sign those tokens. Later `PATCH` and `PUT` requests must present that
 token, and the token repository must match the requested repository path. The
-target-selected upstream registry is also bound into the upload token so later
-upload chunks and commits continue against the same backend.
+target-selected upstream registry and upstream repository path are also bound
+into the upload token so later upload chunks and commits continue against the
+same backend/path.
+
+`Target.RepoMapper` can map client-facing repository paths to upstream
+repository paths for the current request. A nil mapper uses the same path upstream. Registry
+`Location` headers are rewritten back with the current request's mapper, while
+external storage redirects are left alone.
 
 Upstream storage redirects are passed through by default. This keeps upload body
 retries in the OCI client, which already has replayable access to the layer
@@ -90,7 +97,10 @@ exact Authorization header value the proxy should send upstream. Set
 observes at least one registry redirect through the proxy. Set
 `OCIPROXY_EXPERIMENTAL_PROXY_STREAM_REDIRECTS=1` and
 `OCIPROXY_FORBID_CLIENT_REDIRECT=1` to verify that the proxy can follow storage
-redirects itself for replay-safe requests such as blob pulls.
+redirects itself for replay-safe requests such as blob pulls. Set
+`OCIPROXY_UPSTREAM_REPO_PREFIX` to run the real-registry test with
+`PrefixRepoMapper`, and `OCIPROXY_VERIFY_UPSTREAM_REPO=1` to verify the
+prefixed upstream repository directly.
 
 `AuthorizationFromDockerConfig` can turn Docker `config.json` or Kubernetes
 `.dockerconfigjson` credentials into an upstream Authorization header for a set

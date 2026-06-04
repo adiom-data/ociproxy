@@ -115,6 +115,10 @@ func (p *Proxy[S]) serve(w http.ResponseWriter, r *http.Request) error {
 			return statusError{status: http.StatusForbidden, err: err.Error()}
 		}
 		target.BaseURL = upstream
+		target.RepoMapper = exactRepoMapper{
+			Public:   state.Repo,
+			Upstream: state.UpstreamRepo,
+		}
 	}
 	if err := validateTarget(target); err != nil {
 		return statusError{status: http.StatusForbidden, err: err.Error()}
@@ -170,11 +174,12 @@ func (p *Proxy[S]) serve(w http.ResponseWriter, r *http.Request) error {
 		}
 		state.Query = rawQuery
 		token, err := p.Tokens.Sign(uploadState{
-			UploadID: state.UploadID,
-			Repo:     state.Repo,
-			Upstream: state.Upstream,
-			Query:    state.Query,
-			Expiry:   state.Expiry,
+			UploadID:     state.UploadID,
+			Repo:         state.Repo,
+			UpstreamRepo: state.UpstreamRepo,
+			Upstream:     state.Upstream,
+			Query:        state.Query,
+			Expiry:       state.Expiry,
 		})
 		if err != nil {
 			return statusError{status: http.StatusInternalServerError, err: err.Error()}
@@ -183,7 +188,7 @@ func (p *Proxy[S]) serve(w http.ResponseWriter, r *http.Request) error {
 		locationHandled = true
 	}
 	if !isRedirect(resp.StatusCode) && !locationHandled {
-		p.rewriteRegistryLocation(resp, target.BaseURL)
+		p.rewriteRegistryLocation(resp, target)
 	}
 
 	copyHeader(w.Header(), resp.Header)
@@ -221,7 +226,7 @@ func (p *Proxy[S]) upstreamRequest(in *http.Request, rt route, state uploadState
 	}
 	if rt.kind == routeUploadStart && rt.mount {
 		q := u.Query()
-		q.Set("from", rt.from)
+		q.Set("from", target.UpstreamRepo(rt.from))
 		u.RawQuery = q.Encode()
 	}
 
@@ -249,7 +254,7 @@ func (p *Proxy[S]) upstreamRequest(in *http.Request, rt route, state uploadState
 }
 
 func upstreamPathForRoute(rt route, state uploadState, target Target) string {
-	repo := rt.repo
+	repo := target.UpstreamRepo(rt.repo)
 	switch rt.kind {
 	case routeBase:
 		return "/v2/"
@@ -260,7 +265,11 @@ func upstreamPathForRoute(rt route, state uploadState, target Target) string {
 	case routeUploadStart:
 		return routePath(repo, "blobs", "uploads", "")
 	case routeUploadSession:
-		return routePath(repo, "blobs", "uploads", state.UploadID)
+		upstreamRepo := state.UpstreamRepo
+		if upstreamRepo == "" {
+			upstreamRepo = repo
+		}
+		return routePath(upstreamRepo, "blobs", "uploads", state.UploadID)
 	default:
 		return routePath(repo)
 	}
@@ -291,10 +300,11 @@ func (p *Proxy[S]) rewriteUploadLocation(resp *http.Response, repo string, targe
 		return err
 	}
 	token, err := p.Tokens.Sign(uploadState{
-		UploadID: uploadID,
-		Repo:     repo,
-		Upstream: target.BaseURL.String(),
-		Query:    rawQuery,
+		UploadID:     uploadID,
+		Repo:         repo,
+		UpstreamRepo: target.UpstreamRepo(repo),
+		Upstream:     target.BaseURL.String(),
+		Query:        rawQuery,
 	})
 	if err != nil {
 		return err
@@ -330,7 +340,7 @@ func extractUploadLocation(loc string) (string, string, error) {
 	return uploadID, u.RawQuery, nil
 }
 
-func (p *Proxy[S]) rewriteRegistryLocation(resp *http.Response, upstream *url.URL) {
+func (p *Proxy[S]) rewriteRegistryLocation(resp *http.Response, target Target) {
 	loc := resp.Header.Get("Location")
 	if loc == "" {
 		return
@@ -339,11 +349,14 @@ func (p *Proxy[S]) rewriteRegistryLocation(resp *http.Response, upstream *url.UR
 	if err != nil {
 		return
 	}
-	if u.Host != "" && !sameEndpoint(u, upstream) {
+	if u.Host != "" && !sameEndpoint(u, target.BaseURL) {
 		return
 	}
 	if u.Host == "" && !strings.HasPrefix(u.Path, "/v2/") {
 		return
+	}
+	if rewritten, ok := rewriteLocationRepo(u.Path, target); ok {
+		u.Path = rewritten
 	}
 	if p.ExternalBase != nil {
 		base := *p.ExternalBase
@@ -355,6 +368,51 @@ func (p *Proxy[S]) rewriteRegistryLocation(resp *http.Response, upstream *url.UR
 	u.Scheme = ""
 	u.Host = ""
 	resp.Header.Set("Location", u.String())
+}
+
+func rewriteLocationRepo(path string, target Target) (string, bool) {
+	if target.RepoMapper == nil {
+		return path, false
+	}
+	rt, err := parseRoute(&http.Request{Method: http.MethodGet, URL: &url.URL{Path: path}})
+	if err != nil || rt.repo == "" {
+		return path, false
+	}
+	clientRepo, ok := target.ClientRepo(rt.repo)
+	if ok {
+		return replaceRepoInPath(path, rt.repo, clientRepo), true
+	}
+	return path, false
+}
+
+type exactRepoMapper struct {
+	Public   string
+	Upstream string
+}
+
+func (m exactRepoMapper) UpstreamRepo(repo string) string {
+	if repo == m.Public {
+		return m.Upstream
+	}
+	return repo
+}
+
+func (m exactRepoMapper) ClientRepo(repo string) (string, bool) {
+	if repo == m.Upstream {
+		return m.Public, true
+	}
+	return repo, true
+}
+
+func replaceRepoInPath(path, fromRepo, toRepo string) string {
+	from := "/v2/" + fromRepo + "/"
+	if strings.HasPrefix(path, from) {
+		return "/v2/" + toRepo + "/" + strings.TrimPrefix(path, from)
+	}
+	if path == strings.TrimSuffix(from, "/") {
+		return "/v2/" + toRepo
+	}
+	return path
 }
 
 func sameEndpoint(a, b *url.URL) bool {

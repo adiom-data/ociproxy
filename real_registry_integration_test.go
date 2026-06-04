@@ -28,6 +28,7 @@ func TestRealRegistryPushAndPullThroughProxy(t *testing.T) {
 	}
 	upstreamAuth := os.Getenv("OCIPROXY_UPSTREAM_AUTH")
 	dockerConfig := []byte(os.Getenv("OCIPROXY_DOCKER_CONFIG_JSON"))
+	repoPrefix := os.Getenv("OCIPROXY_UPSTREAM_REPO_PREFIX")
 	upstream, err := url.Parse(registryURL)
 	if err != nil {
 		t.Fatal(err)
@@ -44,13 +45,17 @@ func TestRealRegistryPushAndPullThroughProxy(t *testing.T) {
 			auth := upstreamAuth
 			if auth == "" && len(dockerConfig) > 0 {
 				auth, err = AuthorizationFromDockerConfig(ctx, nil, upstream, dockerConfig, []RegistryScope{
-					RepositoryScope(testRepo, "pull", "push"),
+					RepositoryScope(prefixedRepo(repoPrefix, testRepo), "pull", "push"),
 				})
 				if err != nil {
 					return Target{}, err
 				}
 			}
-			return Target{BaseURL: upstream, Authorization: auth}, nil
+			target := Target{BaseURL: upstream, Authorization: auth}
+			if repoPrefix != "" {
+				target.RepoMapper = PrefixRepoMapper(repoPrefix)
+			}
+			return target, nil
 		}),
 		AuthorizerFunc[struct{}](func(ctx context.Context, req PolicyRequest[struct{}]) error {
 			for _, access := range req.Accesses {
@@ -115,6 +120,18 @@ func TestRealRegistryPushAndPullThroughProxy(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("forbidden repo status = %d", resp.StatusCode)
+	}
+	if os.Getenv("OCIPROXY_VERIFY_UPSTREAM_REPO") != "" {
+		verifyAuth := upstreamAuth
+		if verifyAuth == "" && len(dockerConfig) > 0 {
+			verifyAuth, err = AuthorizationFromDockerConfig(context.Background(), nil, upstream, dockerConfig, []RegistryScope{
+				RepositoryScope(prefixedRepo(repoPrefix, testRepo), "pull"),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		verifyUpstreamRepo(t, client, registryURL, prefixedRepo(repoPrefix, testRepo), verifyAuth)
 	}
 	if os.Getenv("OCIPROXY_REQUIRE_REDIRECT") != "" && len(redirects) == 0 {
 		t.Fatal("expected at least one redirect, saw none")
@@ -228,6 +245,26 @@ func get(t *testing.T, client *http.Client, target, accept string) []byte {
 	return got
 }
 
+func verifyUpstreamRepo(t *testing.T, client *http.Client, registryURL, repo, upstreamAuth string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(registryURL, "/")+"/v2/"+repo+"/manifests/v1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upstreamAuth != "" {
+		req.Header.Set("Authorization", upstreamAuth)
+	}
+	req.Header.Set("Accept", "application/vnd.docker.distribution.manifest.v2+json")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("upstream repo %s status = %d", repo, resp.StatusCode)
+	}
+}
+
 func imageManifest(configDigest string, configSize int, layerDigest string, layerSize int) []byte {
 	doc := map[string]any{
 		"schemaVersion": 2,
@@ -262,6 +299,14 @@ func absoluteURL(base, loc string) string {
 		return loc
 	}
 	return strings.TrimRight(base, "/") + loc
+}
+
+func prefixedRepo(prefix, repo string) string {
+	prefix = strings.Trim(prefix, "/")
+	if prefix == "" {
+		return repo
+	}
+	return prefix + "/" + repo
 }
 
 func responseBody(t *testing.T, resp *http.Response) string {

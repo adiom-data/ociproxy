@@ -302,6 +302,115 @@ func TestNewRequiresTargetSelectedUpstream(t *testing.T) {
 	}
 }
 
+func TestRepoMappingPrefixesUpstreamAndRewritesLocations(t *testing.T) {
+	var paths []string
+	var gotFrom string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		gotFrom = r.URL.Query().Get("from")
+		switch r.Method {
+		case http.MethodPost:
+			w.Header().Set("Location", "/v2/remote/123/local/asdf/blobs/uploads/upstream-upload?_state=abc")
+			w.WriteHeader(http.StatusAccepted)
+		case http.MethodPatch:
+			w.Header().Set("Location", "/v2/remote/123/local/asdf/blobs/uploads/upstream-upload?_state=def")
+			w.WriteHeader(http.StatusAccepted)
+		case http.MethodPut:
+			w.Header().Set("Location", "/v2/remote/123/local/asdf/blobs/sha256:abc")
+			w.WriteHeader(http.StatusCreated)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer upstream.Close()
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy, err := New[struct{}](
+		AuthenticatorFunc[struct{}](func(context.Context, AuthRequest) (AuthResult[struct{}], error) {
+			return AuthResult[struct{}]{}, nil
+		}),
+		TargetResolverFunc[struct{}](func(context.Context, TargetRequest[struct{}]) (Target, error) {
+			return Target{
+				BaseURL:    upstreamURL,
+				RepoMapper: PrefixRepoMapper("remote/123"),
+			}, nil
+		}),
+		AllowAll[struct{}](),
+		[]byte("test-key"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	proxy.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v2/local/asdf/blobs/uploads/?mount=sha256:abc&from=shared/base/python", nil))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("start status = %d", rec.Code)
+	}
+	if paths[0] != "/v2/remote/123/local/asdf/blobs/uploads/" {
+		t.Fatalf("start upstream path = %q", paths[0])
+	}
+	if gotFrom != "remote/123/shared/base/python" {
+		t.Fatalf("from = %q", gotFrom)
+	}
+	loc := rec.Header().Get("Location")
+	if !strings.HasPrefix(loc, "/v2/local/asdf/blobs/uploads/") {
+		t.Fatalf("start Location = %q", loc)
+	}
+
+	rec = httptest.NewRecorder()
+	proxy.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, loc, strings.NewReader("x")))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("patch status = %d", rec.Code)
+	}
+	if paths[1] != "/v2/remote/123/local/asdf/blobs/uploads/upstream-upload" {
+		t.Fatalf("patch upstream path = %q", paths[1])
+	}
+	loc = rec.Header().Get("Location")
+
+	rec = httptest.NewRecorder()
+	proxy.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, loc+"?digest=sha256:abc", nil))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("commit status = %d", rec.Code)
+	}
+	if got := rec.Header().Get("Location"); got != "/v2/local/asdf/blobs/sha256:abc" {
+		t.Fatalf("commit Location = %q", got)
+	}
+}
+
+func TestRepoMapperCanLeaveSharedReposIdentity(t *testing.T) {
+	mapper := RepoMapperFunc{
+		Upstream: func(repo string) string {
+			if strings.HasPrefix(repo, "shared/") {
+				return repo
+			}
+			return "remote/123/" + repo
+		},
+		Public: func(repo string) (string, bool) {
+			if strings.HasPrefix(repo, "shared/") {
+				return repo, true
+			}
+			return strings.CutPrefix(repo, "remote/123/")
+		},
+	}
+
+	if got := mapper.UpstreamRepo("local/asdf"); got != "remote/123/local/asdf" {
+		t.Fatalf("mapped local repo = %q", got)
+	}
+	if got := mapper.UpstreamRepo("shared/base/python"); got != "shared/base/python" {
+		t.Fatalf("mapped shared repo = %q", got)
+	}
+	if got, ok := mapper.ClientRepo("remote/123/local/asdf"); !ok || got != "local/asdf" {
+		t.Fatalf("client local repo = %q, %v", got, ok)
+	}
+	if got, ok := mapper.ClientRepo("shared/base/python"); !ok || got != "shared/base/python" {
+		t.Fatalf("client shared repo = %q, %v", got, ok)
+	}
+}
+
 func newTestProxy(t *testing.T, upstream string) *Proxy[struct{}] {
 	t.Helper()
 	u, err := url.Parse(upstream)
@@ -333,10 +442,11 @@ func uploadToken(t *testing.T, proxy *Proxy[struct{}], repo, uploadID string) st
 func uploadTokenForUpstream(t *testing.T, proxy *Proxy[struct{}], repo, uploadID, upstream string) string {
 	t.Helper()
 	token, err := proxy.Tokens.Sign(uploadState{
-		UploadID: uploadID,
-		Repo:     repo,
-		Upstream: upstream,
-		Expiry:   time.Now().Add(time.Minute).Unix(),
+		UploadID:     uploadID,
+		Repo:         repo,
+		UpstreamRepo: repo,
+		Upstream:     upstream,
+		Expiry:       time.Now().Add(time.Minute).Unix(),
 	})
 	if err != nil {
 		t.Fatal(err)

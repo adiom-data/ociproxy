@@ -12,11 +12,12 @@ import (
 )
 
 type uploadState struct {
-	UploadID string `json:"u"`
-	Repo     string `json:"r"`
-	Upstream string `json:"h,omitempty"`
-	Query    string `json:"q,omitempty"`
-	Expiry   int64  `json:"exp"`
+	UploadID     string `json:"u"`
+	Repo         string `json:"r"`
+	UpstreamRepo string `json:"ur,omitempty"`
+	Upstream     string `json:"h,omitempty"`
+	Query        string `json:"q,omitempty"`
+	Expiry       int64  `json:"exp"`
 }
 
 // TokenCodec signs and verifies client-echoed upload session state.
@@ -69,6 +70,9 @@ func (c TokenCodec) Verify(token string) (uploadState, error) {
 	}
 	if state.UploadID == "" || state.Repo == "" || state.Expiry == 0 {
 		return uploadState{}, errors.New("incomplete upload token")
+	}
+	if state.UpstreamRepo == "" {
+		state.UpstreamRepo = state.Repo
 	}
 	if c.now().Unix() >= state.Expiry {
 		return uploadState{}, errors.New("expired upload token")
