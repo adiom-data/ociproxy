@@ -157,6 +157,42 @@ func TestRepoMayContainReservedWords(t *testing.T) {
 	}
 }
 
+func TestTagsListRequiresPullAndForwardsQuery(t *testing.T) {
+	var gotPath string
+	var gotQuery string
+	var gotAccesses []Access
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"name":"tenant-a/app","tags":["v1"]}`))
+	}))
+	defer upstream.Close()
+
+	proxy := newTestProxy(t, upstream.URL)
+	proxy.Authorizer = AuthorizerFunc[struct{}](func(ctx context.Context, req PolicyRequest[struct{}]) error {
+		gotAccesses = req.Accesses
+		return nil
+	})
+	req := httptest.NewRequest(http.MethodGet, "/v2/tenant-a/app/tags/list?n=10&last=v0", nil)
+	rec := httptest.NewRecorder()
+
+	proxy.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if gotPath != "/v2/tenant-a/app/tags/list" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	if gotQuery != "n=10&last=v0" {
+		t.Fatalf("query = %q", gotQuery)
+	}
+	if len(gotAccesses) != 1 || gotAccesses[0] != (Access{Action: ActionPull, Repo: "tenant-a/app"}) {
+		t.Fatalf("accesses = %+v", gotAccesses)
+	}
+}
+
 func TestMalformedMountDoesNotReachUpstream(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatalf("malformed mount reached upstream")
@@ -378,6 +414,46 @@ func TestRepoMappingPrefixesUpstreamAndRewritesLocations(t *testing.T) {
 	}
 	if got := rec.Header().Get("Location"); got != "/v2/local/asdf/blobs/sha256:abc" {
 		t.Fatalf("commit Location = %q", got)
+	}
+}
+
+func TestRepoMappingPrefixesTagsList(t *testing.T) {
+	var gotPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy, err := New[struct{}](
+		AuthenticatorFunc[struct{}](func(context.Context, AuthRequest) (AuthResult[struct{}], error) {
+			return AuthResult[struct{}]{}, nil
+		}),
+		TargetResolverFunc[struct{}](func(context.Context, TargetRequest[struct{}]) (Target, error) {
+			return Target{
+				BaseURL:    upstreamURL,
+				RepoMapper: PrefixRepoMapper("remote/123"),
+			}, nil
+		}),
+		AllowAll[struct{}](),
+		[]byte("test-key"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	proxy.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v2/local/asdf/tags/list", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if gotPath != "/v2/remote/123/local/asdf/tags/list" {
+		t.Fatalf("path = %q", gotPath)
 	}
 }
 

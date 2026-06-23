@@ -16,6 +16,7 @@ const (
 	routeBase
 	routeManifest
 	routeBlob
+	routeTagsList
 	routeUploadStart
 	routeUploadSession
 )
@@ -65,6 +66,17 @@ func parseRoute(r *http.Request) (route, error) {
 			return route{}, errors.New("unsupported manifest method")
 		}
 		return rt, nil
+	}
+
+	if idx := lastIndexMarker(parts, "tags"); idx >= 1 && idx+1 == len(parts)-1 && parts[idx+1] == "list" {
+		if r.Method != http.MethodGet {
+			return route{}, errors.New("unsupported tags list method")
+		}
+		repo, err := canonicalRepo(parts[:idx])
+		if err != nil {
+			return route{}, err
+		}
+		return route{kind: routeTagsList, repo: repo, access: []Access{{Action: ActionPull, Repo: repo}}}, nil
 	}
 
 	if idx := lastIndexMarker(parts, "blobs"); idx >= 1 && idx+1 < len(parts) {

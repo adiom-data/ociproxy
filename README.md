@@ -45,6 +45,7 @@ http.ListenAndServe(":8080", proxy)
 Every OCI request is parsed into required repository accesses:
 
 - `GET`/`HEAD` manifests and blobs require `pull`.
+- `GET` tags lists require `pull`.
 - `PUT` manifests, blob upload starts, upload chunks, and upload commits require
   `push`.
 - Cross-repository blob mounts require `push` on the target repository and

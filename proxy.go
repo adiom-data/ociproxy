@@ -262,6 +262,8 @@ func upstreamPathForRoute(rt route, state uploadState, target Target) string {
 		return routePath(repo, "manifests", rt.ref)
 	case routeBlob:
 		return routePath(repo, "blobs", rt.ref)
+	case routeTagsList:
+		return routePath(repo, "tags", "list")
 	case routeUploadStart:
 		return routePath(repo, "blobs", "uploads", "")
 	case routeUploadSession:
